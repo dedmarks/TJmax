@@ -12,6 +12,7 @@
   "license": "MIT",
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "bybit-api": "^4.1.13",
     "config": "^3.3.9",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",

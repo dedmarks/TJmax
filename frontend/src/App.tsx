@@ -9,6 +9,7 @@ import Profile from './components/auth/Profile';
 import EntryForm from './components/journal/EntryForm';
 import JournalList from './components/journal/JournalList';
 import TradeView from './components/journal/TradeView';
+import BybitImport from './components/bybit/BybitImport';
 import PrivateRoute from './components/common/PrivateRoute';
 
 import AuthState from './context/auth/AuthState';
@@ -51,6 +52,7 @@ const AppContent: React.FC = () => {
           <Route path="/journal/new" element={<EntryForm />} />
           <Route path="/journal/:id" element={<EntryForm />} />
           <Route path="/journal/view/:id" element={<TradeView />} />
+          <Route path="/bybit-import" element={<PrivateRoute component={BybitImport} />} />
         </Routes>
       </div>
     </div>

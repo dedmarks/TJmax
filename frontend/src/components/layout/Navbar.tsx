@@ -25,6 +25,7 @@ import ExitToAppIcon from '@mui/icons-material/ExitToApp';
 import LightModeIcon from '@mui/icons-material/LightMode';
 import DarkModeIcon from '@mui/icons-material/DarkMode';
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet';
+import CloudDownloadIcon from '@mui/icons-material/CloudDownload';
 import AuthContext from '../../context/auth/AuthContext';
 import MetricsContext from '../../context/metrics/MetricsContext';
 import { useTheme } from '../../context/theme/ThemeContext';
@@ -153,6 +154,9 @@ const Navbar: React.FC = () => {
             <MenuItem component={RouterLink} to="/journal" onClick={handleMenuClose}>
               <ListAltIcon sx={{ mr: 1 }} /> Journal
             </MenuItem>
+            <MenuItem component={RouterLink} to="/bybit-import" onClick={handleMenuClose}>
+              <CloudDownloadIcon sx={{ mr: 1 }} /> Bybit Import
+            </MenuItem>
             <MenuItem component={RouterLink} to="/profile" onClick={handleMenuClose}>
               <PersonIcon sx={{ mr: 1 }} /> Profile
             </MenuItem>
@@ -180,6 +184,15 @@ const Navbar: React.FC = () => {
             sx={{ mr: 1 }}
           >
             Journal
+          </Button>
+          <Button
+            color="inherit"
+            component={RouterLink}
+            to="/bybit-import"
+            startIcon={<CloudDownloadIcon />}
+            sx={{ mr: 1 }}
+          >
+            Bybit Import
           </Button>
           <Button
             color="inherit"

@@ -73,23 +73,7 @@ const JournalSchema = new mongoose.Schema({
     type: String
   },
   images: [{
-    url: {
-      type: String,
-      required: true
-    },
-    description: {
-      type: String,
-      default: ''
-    },
-    category: {
-      type: String,
-      enum: ['chart', 'setup', 'entry', 'exit', 'other'],
-      default: 'other'
-    },
-    uploadedAt: {
-      type: Date,
-      default: Date.now
-    }
+    type: String
   }],
   timeframe: {
     type: String,
@@ -101,88 +85,16 @@ const JournalSchema = new mongoose.Schema({
   },
   psychologicalState: {
     before: {
-      state: {
-        type: String,
-        enum: ['Calm', 'Excited', 'Fearful', 'Confident', 'Uncertain', 'Anxious', 'Focused', 'Distracted', 'Optimistic', 'Pessimistic']
-      },
-      confidence: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      stress: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      focus: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      triggers: [{
-        type: String
-      }],
-      notes: {
-        type: String
-      }
+      type: String,
+      enum: ['Calm', 'Excited', 'Fearful', 'Confident', 'Uncertain']
     },
     during: {
-      state: {
-        type: String,
-        enum: ['Calm', 'Excited', 'Fearful', 'Confident', 'Uncertain', 'Anxious', 'Focused', 'Distracted', 'Optimistic', 'Pessimistic']
-      },
-      confidence: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      stress: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      focus: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      triggers: [{
-        type: String
-      }],
-      notes: {
-        type: String
-      }
+      type: String,
+      enum: ['Calm', 'Excited', 'Fearful', 'Confident', 'Uncertain']
     },
     after: {
-      state: {
-        type: String,
-        enum: ['Calm', 'Excited', 'Fearful', 'Confident', 'Uncertain', 'Anxious', 'Focused', 'Distracted', 'Optimistic', 'Pessimistic']
-      },
-      confidence: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      stress: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      focus: {
-        type: Number,
-        min: 1,
-        max: 10
-      },
-      triggers: [{
-        type: String
-      }],
-      notes: {
-        type: String
-      }
-    },
-    lessons: {
-      type: String
+      type: String,
+      enum: ['Calm', 'Excited', 'Fearful', 'Confident', 'Uncertain']
     }
   },
   maxAdverseExcursion: {
