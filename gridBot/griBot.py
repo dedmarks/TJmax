@@ -3,46 +3,44 @@ import pandas as pd
 import numpy as np
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
-from typing import Dict, List, Optional
-# New imports for enhancements
-from arch import arch_model
-import scipy.stats as stats
-from statsmodels.tsa.stattools import adfuller
+from typing import Dict, List, Optional, Tuple
+import asyncio
+from collections import deque
+import statistics
+
+# Enhanced imports for advanced strategies
+from scipy.optimize import minimize
+from scipy.stats import jarque_bera, normaltest
+import warnings
+warnings.filterwarnings('ignore')
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('grid_trading_futures.log'),
+        logging.FileHandler('enhanced_grid_trading.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
-class FuturesGridTrader:
+class EnhancedFuturesGridTrader:
     def __init__(self, symbol: str, api_key: str, secret: str, capital: float, 
-                 leverage: int = 7, grid_levels: int = 10, min_grid_spacing: float = 0.005,
-                 max_position_ratio: float = 0.8, use_testnet: bool = True,
-                 z_score_window: int = 20, z_score_threshold: float = 2.0,
-                 var_confidence: float = 0.95, var_days: int = 1):
+                 leverage: int = 40, base_grid_levels: int = 8, 
+                 use_testnet: bool = False, max_position_ratio: float = 0.9):
         """
-        Initialize Futures Grid Trading Bot with Leverage
+        Enhanced Futures Grid Trading Bot focused on profitability
         
-        Args:
-            symbol: Trading pair (e.g., 'BTC/USDT:USDT')
-            api_key: Bybit API key
-            secret: Bybit API secret
-            capital: Total capital for grid trading
-            leverage: Leverage multiplier (1-100)
-            grid_levels: Number of grid levels each side
-            min_grid_spacing: Minimum grid spacing as percentage
-            max_position_ratio: Maximum position size ratio
-            use_testnet: Use testnet for testing
-            z_score_window: Window size for Z-score calculation
-            z_score_threshold: Z-score threshold for mean reversion signals
+        Key improvements:
+        - Dynamic grid sizing based on market microstructure
+        - Orderbook imbalance analysis
+        - Funding rate arbitrage optimization
+        - Volatility regime detection
+        - Adaptive position sizing
+        - Market making vs taking decisions
         """
         self.bybit = ccxt.bybit({
             'apiKey': api_key,
@@ -50,44 +48,510 @@ class FuturesGridTrader:
             'sandbox': use_testnet,
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'swap'  # Use perpetual futures
+                'defaultType': 'swap'
             }
         })
         
         self.symbol = symbol
         self.capital = capital
         self.leverage = leverage
-        self.grid_levels = grid_levels
-        self.min_grid_spacing = min_grid_spacing
+        self.base_grid_levels = base_grid_levels
         self.max_position_ratio = max_position_ratio
         
-        # Trading state
+        # Enhanced trading state
         self.active_orders: Dict[str, Dict] = {}
         self.filled_orders: List[Dict] = []
-        self.base_price: Optional[float] = None
-        self.grid_spacing: Optional[float] = None
+        self.current_position: float = 0.0
         self.total_profit: float = 0.0
         self.is_running: bool = False
-        self.current_position: float = 0.0  # Track net position
-        self.position_side: str = 'both'  # 'both', 'long', 'short'
-        self.price_history: List[float] = []  # Add this line to store price history
-        
-        # Performance tracking
         self.trades_count: int = 0
         self.start_time: Optional[datetime] = None
-        self.funding_fees: float = 0.0
         
-        # VaR parameters
-        self.var_confidence = var_confidence
-        self.var_days = var_days
-        self.returns_history = []
+        # Market microstructure data
+        self.orderbook_history = deque(maxlen=100)
+        self.trade_flow_history = deque(maxlen=200)
+        self.funding_rate_history = deque(maxlen=48)  # 48 hours of funding rates
+        self.price_history = deque(maxlen=500)
+        self.volume_history = deque(maxlen=200)
+        
+        # Dynamic parameters
+        self.current_spread_multiplier = 1.0
+        self.volatility_regime = 'normal'  # 'low', 'normal', 'high', 'extreme'
+        self.market_regime = 'neutral'  # 'bullish', 'bearish', 'neutral', 'choppy'
+        self.funding_bias = 0.0
+        
+        # Performance tracking
+        self.funding_fees_collected = 0.0
+        self.maker_rebates = 0.0
+        self.slippage_costs = 0.0
+        self.opportunity_cost = 0.0
         
         # Risk management
-        self.max_position_size: float = 0.0
-        self.liquidation_price: Optional[float] = None
+        self.max_drawdown = 0.0
+        self.peak_equity = capital
+        self.daily_pnl_history = deque(maxlen=30)
         
-        logger.info(f"Futures Grid Trader initialized for {symbol}")
-        logger.info(f"Capital: ${capital}, Leverage: {leverage}x, Grid Levels: {grid_levels}")
+        logger.info(f"Enhanced Grid Trader initialized for {symbol}")
+        logger.info(f"Capital: ${capital}, Leverage: {leverage}x, Base Grid Levels: {base_grid_levels}")
+    
+    async def get_enhanced_market_data(self) -> Dict:
+        """Get comprehensive market data including orderbook depth"""
+        try:
+            # Get basic market data
+            ticker = self.bybit.fetch_ticker(self.symbol)
+            funding_rate = self.bybit.fetch_funding_rate(self.symbol)
+            
+            # Get orderbook for microstructure analysis
+            orderbook = self.bybit.fetch_order_book(self.symbol, limit=20)
+            
+            # Get recent trades for flow analysis
+            recent_trades = self.bybit.fetch_trades(self.symbol, limit=100)
+            
+            market_data = {
+                'price': ticker['last'],
+                'bid': ticker['bid'],
+                'ask': ticker['ask'],
+                'spread': ticker['ask'] - ticker['bid'],
+                'spread_bps': ((ticker['ask'] - ticker['bid']) / ticker['last']) * 10000,
+                'volume': ticker['baseVolume'],
+                'funding_rate': funding_rate['fundingRate'],
+                'funding_time': funding_rate['fundingDatetime'],
+                'orderbook': orderbook,
+                'recent_trades': recent_trades,
+                'timestamp': datetime.now()
+            }
+            
+            # Update histories
+            self.price_history.append(market_data['price'])
+            self.volume_history.append(market_data['volume'])
+            self.funding_rate_history.append(market_data['funding_rate'])
+            self.orderbook_history.append(orderbook)
+            self.trade_flow_history.extend(recent_trades)
+            
+            return market_data
+            
+        except Exception as e:
+            logger.error(f"Error fetching enhanced market data: {e}")
+            raise
+    
+    def analyze_orderbook_imbalance(self, orderbook: Dict) -> Dict:
+        """Analyze orderbook for imbalance and liquidity"""
+        try:
+            bids = orderbook['bids'][:10]  # Top 10 levels
+            asks = orderbook['asks'][:10]
+            
+            bid_volume = sum(level[1] for level in bids)
+            ask_volume = sum(level[1] for level in asks)
+            total_volume = bid_volume + ask_volume
+            
+            # Calculate imbalance ratio (-1 to 1, positive = more bids)
+            imbalance_ratio = (bid_volume - ask_volume) / total_volume if total_volume > 0 else 0
+            
+            # Calculate weighted mid price
+            if bids and asks:
+                weighted_mid = (bids[0][0] * ask_volume + asks[0][0] * bid_volume) / total_volume
+            else:
+                weighted_mid = (bids[0][0] + asks[0][0]) / 2 if bids and asks else 0
+            
+            # Calculate liquidity depth
+            price_range = asks[-1][0] - bids[-1][0] if len(bids) >= 10 and len(asks) >= 10 else 0
+            liquidity_density = total_volume / price_range if price_range > 0 else 0
+            
+            return {
+                'imbalance_ratio': imbalance_ratio,
+                'bid_volume': bid_volume,
+                'ask_volume': ask_volume,
+                'total_volume': total_volume,
+                'weighted_mid': weighted_mid,
+                'liquidity_density': liquidity_density,
+                'spread': asks[0][0] - bids[0][0] if bids and asks else 0
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing orderbook: {e}")
+            return {}
+    
+    def analyze_trade_flow(self) -> Dict:
+        """Analyze recent trade flow for directional bias"""
+        try:
+            if len(self.trade_flow_history) < 50:
+                return {'flow_bias': 0.0, 'volume_weighted_price': 0.0, 'aggressor_ratio': 0.5}
+            
+            recent_trades = list(self.trade_flow_history)[-100:]
+            
+            buy_volume = sum(trade['amount'] for trade in recent_trades if trade['side'] == 'buy')
+            sell_volume = sum(trade['amount'] for trade in recent_trades if trade['side'] == 'sell')
+            total_volume = buy_volume + sell_volume
+            
+            # Flow bias: positive = more buying pressure
+            flow_bias = (buy_volume - sell_volume) / total_volume if total_volume > 0 else 0
+            
+            # Volume weighted average price
+            vwap = sum(trade['price'] * trade['amount'] for trade in recent_trades) / total_volume if total_volume > 0 else 0
+            
+            # Aggressor ratio (market orders vs limit orders)
+            market_orders = sum(1 for trade in recent_trades if trade.get('takerOrMaker') == 'taker')
+            aggressor_ratio = market_orders / len(recent_trades) if recent_trades else 0.5
+            
+            return {
+                'flow_bias': flow_bias,
+                'volume_weighted_price': vwap,
+                'aggressor_ratio': aggressor_ratio,
+                'buy_volume': buy_volume,
+                'sell_volume': sell_volume
+            }
+            
+        except Exception as e:
+            logger.error(f"Error analyzing trade flow: {e}")
+            return {'flow_bias': 0.0, 'volume_weighted_price': 0.0, 'aggressor_ratio': 0.5}
+    
+    def detect_volatility_regime(self) -> str:
+        """Detect current volatility regime using multiple timeframes"""
+        try:
+            if len(self.price_history) < 50:
+                return 'normal'
+            
+            prices = np.array(list(self.price_history))
+            returns = np.diff(np.log(prices)) * 100
+            
+            # Calculate volatility metrics
+            current_vol = np.std(returns[-24:]) * np.sqrt(24) if len(returns) >= 24 else 0
+            long_term_vol = np.std(returns[-168:]) * np.sqrt(24) if len(returns) >= 168 else current_vol
+            
+            # Volatility regime classification
+            vol_ratio = current_vol / long_term_vol if long_term_vol > 0 else 1
+            
+            if vol_ratio < 0.7:
+                regime = 'low'
+            elif vol_ratio > 2.0:
+                regime = 'extreme'
+            elif vol_ratio > 1.3:
+                regime = 'high'
+            else:
+                regime = 'normal'
+            
+            # Additional check for regime stability
+            recent_vols = [np.std(returns[i-12:i]) for i in range(max(12, len(returns)-48), len(returns), 12)]
+            vol_stability = np.std(recent_vols) / np.mean(recent_vols) if recent_vols and np.mean(recent_vols) > 0 else 0
+            
+            if vol_stability > 0.5:  # High volatility instability
+                regime = 'extreme'
+            
+            logger.info(f"Volatility regime: {regime} (ratio: {vol_ratio:.2f}, stability: {vol_stability:.2f})")
+            return regime
+            
+        except Exception as e:
+            logger.error(f"Error detecting volatility regime: {e}")
+            return 'normal'
+    
+    def detect_market_regime(self) -> str:
+        """Detect market regime using price action and flow"""
+        try:
+            if len(self.price_history) < 50:
+                return 'neutral'
+            
+            prices = np.array(list(self.price_history))
+            
+            # Trend detection using multiple timeframes
+            short_trend = (prices[-1] - prices[-12]) / prices[-12] if len(prices) >= 12 else 0
+            medium_trend = (prices[-1] - prices[-48]) / prices[-48] if len(prices) >= 48 else 0
+            
+            # Price momentum
+            momentum_12 = np.mean(np.diff(prices[-12:])) if len(prices) >= 12 else 0
+            momentum_48 = np.mean(np.diff(prices[-48:])) if len(prices) >= 48 else 0
+            
+            # Range detection
+            recent_high = np.max(prices[-48:]) if len(prices) >= 48 else prices[-1]
+            recent_low = np.min(prices[-48:]) if len(prices) >= 48 else prices[-1]
+            range_position = (prices[-1] - recent_low) / (recent_high - recent_low) if recent_high != recent_low else 0.5
+            
+            # Trade flow bias
+            flow_data = self.analyze_trade_flow()
+            flow_bias = flow_data.get('flow_bias', 0)
+            
+            # Regime classification
+            if short_trend > 0.01 and medium_trend > 0.005 and flow_bias > 0.1:
+                regime = 'bullish'
+            elif short_trend < -0.01 and medium_trend < -0.005 and flow_bias < -0.1:
+                regime = 'bearish'
+            elif abs(short_trend) < 0.005 and abs(medium_trend) < 0.003:
+                regime = 'choppy'
+            else:
+                regime = 'neutral'
+            
+            logger.info(f"Market regime: {regime} (short: {short_trend:.4f}, flow: {flow_bias:.3f})")
+            return regime
+            
+        except Exception as e:
+            logger.error(f"Error detecting market regime: {e}")
+            return 'neutral'
+    
+    def calculate_optimal_grid_spacing(self, market_data: Dict) -> float:
+        """Calculate optimal grid spacing based on market conditions"""
+        try:
+            base_spread = market_data['spread_bps'] / 10000  # Convert to decimal
+            
+            # Volatility adjustment
+            volatility_multiplier = {
+                'low': 0.6,
+                'normal': 1.0,
+                'high': 1.4,
+                'extreme': 2.0
+            }.get(self.volatility_regime, 1.0)
+            
+            # Market regime adjustment
+            regime_multiplier = {
+                'choppy': 0.7,    # Tighter grids in choppy markets
+                'neutral': 1.0,
+                'bullish': 1.2,   # Wider grids in trending markets
+                'bearish': 1.2
+            }.get(self.market_regime, 1.0)
+            
+            # Funding rate adjustment
+            funding_rate = abs(market_data.get('funding_rate', 0))
+            funding_multiplier = 1.0 + min(funding_rate * 100, 0.3)  # Cap at 30% adjustment
+            
+            # Orderbook liquidity adjustment
+            if self.orderbook_history:
+                ob_analysis = self.analyze_orderbook_imbalance(self.orderbook_history[-1])
+                liquidity_multiplier = max(0.8, min(1.5, 1.0 / (ob_analysis.get('liquidity_density', 1) + 1)))
+            else:
+                liquidity_multiplier = 1.0
+            
+            # Calculate optimal spacing
+            optimal_spacing = max(
+                base_spread * 2,  # At least 2x the spread
+                0.002 * volatility_multiplier * regime_multiplier * funding_multiplier * liquidity_multiplier
+            )
+            
+            # Ensure minimum spacing for safety
+            optimal_spacing = max(optimal_spacing, 0.0015)  # 0.15% minimum
+            
+            logger.info(f"Optimal grid spacing: {optimal_spacing:.4f} ({optimal_spacing*100:.2f}%)")
+            return optimal_spacing
+            
+        except Exception as e:
+            logger.error(f"Error calculating optimal grid spacing: {e}")
+            return 0.003  # Fallback
+    
+    def calculate_dynamic_grid_levels(self, volatility_regime: str, market_regime: str) -> int:
+        """Calculate dynamic number of grid levels based on market conditions"""
+        base_levels = self.base_grid_levels
+        
+        # Volatility adjustment
+        vol_adjustment = {
+            'low': -2,      # Fewer levels in low vol
+            'normal': 0,
+            'high': 2,      # More levels in high vol
+            'extreme': 4
+        }.get(volatility_regime, 0)
+        
+        # Market regime adjustment
+        regime_adjustment = {
+            'choppy': 3,    # More levels in choppy markets
+            'neutral': 0,
+            'bullish': -1,  # Fewer levels in trending markets
+            'bearish': -1
+        }.get(market_regime, 0)
+        
+        dynamic_levels = max(4, min(15, base_levels + vol_adjustment + regime_adjustment))
+        
+        logger.info(f"Dynamic grid levels: {dynamic_levels} (base: {base_levels})")
+        return dynamic_levels
+    
+    def calculate_position_size_kelly(self, price: float, side: str, win_rate: float = 0.6) -> float:
+        """Calculate position size using Kelly Criterion approximation"""
+        try:
+            # Estimate win rate and average win/loss from recent trades
+            if len(self.filled_orders) >= 10:
+                recent_trades = self.filled_orders[-20:]
+                wins = [t for t in recent_trades if t.get('profit', 0) > 0]
+                losses = [t for t in recent_trades if t.get('profit', 0) < 0]
+                
+                if wins and losses:
+                    win_rate = len(wins) / len(recent_trades)
+                    avg_win = np.mean([t['profit'] for t in wins])
+                    avg_loss = abs(np.mean([t['profit'] for t in losses]))
+                    win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 2.0
+                else:
+                    win_loss_ratio = 1.5  # Conservative default
+            else:
+                win_loss_ratio = 1.5  # Conservative default
+            
+            # Kelly fraction
+            kelly_fraction = (win_rate * win_loss_ratio - (1 - win_rate)) / win_loss_ratio
+            kelly_fraction = max(0.1, min(0.3, kelly_fraction))  # Cap between 10% and 30%
+            
+            # Base position size
+            capital_per_level = self.capital / (self.base_grid_levels * 2)
+            leveraged_capital = capital_per_level * self.leverage * kelly_fraction
+            position_size = leveraged_capital / price
+            
+            # Volatility adjustment
+            vol_adjustment = {
+                'low': 1.2,
+                'normal': 1.0,
+                'high': 0.8,
+                'extreme': 0.6
+            }.get(self.volatility_regime, 1.0)
+            
+            position_size *= vol_adjustment
+            
+            return position_size
+            
+        except Exception as e:
+            logger.error(f"Error calculating Kelly position size: {e}")
+            return self.calculate_position_size_fallback(price)
+    
+    def calculate_position_size_fallback(self, price: float) -> float:
+        """Fallback position size calculation"""
+        capital_per_level = self.capital / (self.base_grid_levels * 2)
+        leveraged_capital = capital_per_level * self.leverage * 0.8  # Conservative 80%
+        return leveraged_capital / price
+    
+    def should_place_maker_order(self, side: str, market_data: Dict) -> bool:
+        """Decide whether to place maker vs taker order based on market conditions"""
+        try:
+            # Always prefer maker orders for grid trading
+            spread_bps = market_data.get('spread_bps', 50)
+            
+            # In very tight spreads, consider taking
+            if spread_bps < 5:  # Less than 0.5 bps
+                flow_data = self.analyze_trade_flow()
+                # If flow is strongly against us, consider taking
+                if (side == 'buy' and flow_data.get('flow_bias', 0) < -0.3) or \
+                   (side == 'sell' and flow_data.get('flow_bias', 0) > 0.3):
+                    return False
+            
+            return True  # Default to maker orders
+            
+        except Exception as e:
+            logger.error(f"Error deciding order type: {e}")
+            return True
+    
+    def optimize_funding_rate_exposure(self, market_data: Dict) -> Dict:
+        """Optimize position to profit from funding rates"""
+        try:
+            funding_rate = market_data.get('funding_rate', 0)
+            
+            # Historical funding rate analysis
+            if len(self.funding_rate_history) >= 8:  # 8 hours of history
+                avg_funding = np.mean(list(self.funding_rate_history))
+                funding_trend = np.polyfit(range(len(self.funding_rate_history)), 
+                                         list(self.funding_rate_history), 1)[0]
+            else:
+                avg_funding = funding_rate
+                funding_trend = 0
+            
+            # Funding rate thresholds (annualized)
+            high_positive_funding = 0.01  # 1% per year
+            high_negative_funding = -0.01
+            
+            strategy = {
+                'bias': 'neutral',
+                'position_adjustment': 1.0,
+                'grid_skew': 0.0
+            }
+            
+            # If funding is consistently high and positive (longs pay shorts)
+            if avg_funding > high_positive_funding:
+                strategy = {
+                    'bias': 'short',
+                    'position_adjustment': 1.2,  # Increase short exposure
+                    'grid_skew': 0.1  # Favor sell orders
+                }
+                logger.info(f"High positive funding detected: {avg_funding:.6f}, favoring shorts")
+            
+            # If funding is consistently negative (shorts pay longs)
+            elif avg_funding < high_negative_funding:
+                strategy = {
+                    'bias': 'long',
+                    'position_adjustment': 1.2,  # Increase long exposure
+                    'grid_skew': -0.1  # Favor buy orders
+                }
+                logger.info(f"High negative funding detected: {avg_funding:.6f}, favoring longs")
+            
+            return strategy
+            
+        except Exception as e:
+            logger.error(f"Error optimizing funding exposure: {e}")
+            return {'bias': 'neutral', 'position_adjustment': 1.0, 'grid_skew': 0.0}
+    
+    def setup_enhanced_grid(self) -> List[Dict]:
+        """Setup enhanced grid with all optimizations"""
+        try:
+            # Get comprehensive market data
+            market_data = asyncio.run(self.get_enhanced_market_data())
+            
+            # Update regimes
+            self.volatility_regime = self.detect_volatility_regime()
+            self.market_regime = self.detect_market_regime()
+            
+            # Calculate optimal parameters
+            optimal_spacing = self.calculate_optimal_grid_spacing(market_data)
+            dynamic_levels = self.calculate_dynamic_grid_levels(self.volatility_regime, self.market_regime)
+            
+            # Funding rate optimization
+            funding_strategy = self.optimize_funding_rate_exposure(market_data)
+            
+            base_price = market_data['price']
+            
+            logger.info(f"Enhanced Grid Setup:")
+            logger.info(f"Base Price: ${base_price:.4f}")
+            logger.info(f"Optimal Spacing: {optimal_spacing:.4f} ({optimal_spacing*100:.2f}%)")
+            logger.info(f"Dynamic Levels: {dynamic_levels}")
+            logger.info(f"Volatility Regime: {self.volatility_regime}")
+            logger.info(f"Market Regime: {self.market_regime}")
+            logger.info(f"Funding Strategy: {funding_strategy['bias']}")
+            
+            # Create optimized orders
+            orders = []
+            
+            for i in range(1, dynamic_levels + 1):
+                # Calculate prices with optimal spacing
+                buy_price = base_price * (1 - optimal_spacing * i)
+                sell_price = base_price * (1 + optimal_spacing * i)
+                
+                # Calculate position sizes using Kelly criterion
+                buy_size = self.calculate_position_size_kelly(buy_price, 'buy')
+                sell_size = self.calculate_position_size_kelly(sell_price, 'sell')
+                
+                # Apply funding rate bias
+                if funding_strategy['bias'] == 'long':
+                    buy_size *= funding_strategy['position_adjustment']
+                    sell_size *= (2 - funding_strategy['position_adjustment'])
+                elif funding_strategy['bias'] == 'short':
+                    sell_size *= funding_strategy['position_adjustment']
+                    buy_size *= (2 - funding_strategy['position_adjustment'])
+                
+                # Ensure minimum size
+                buy_size = max(buy_size, 0.001)
+                sell_size = max(sell_size, 0.001)
+                
+                orders.extend([
+                    {
+                        'side': 'buy',
+                        'price': buy_price,
+                        'size': buy_size,
+                        'level': i,
+                        'type': 'enhanced_grid',
+                        'priority': dynamic_levels - i + 1  # Higher priority for closer levels
+                    },
+                    {
+                        'side': 'sell',
+                        'price': sell_price,
+                        'size': sell_size,
+                        'level': i,
+                        'type': 'enhanced_grid',
+                        'priority': dynamic_levels - i + 1
+                    }
+                ])
+            
+            return orders
+            
+        except Exception as e:
+            logger.error(f"Error setting up enhanced grid: {e}")
+            raise
     
     def setup_leverage_and_margin(self) -> None:
         """Setup leverage and margin mode"""
@@ -97,20 +561,18 @@ class FuturesGridTrader:
                 self.bybit.set_leverage(self.leverage, self.symbol)
                 logger.info(f"Leverage set to {self.leverage}x")
             except Exception as e:
-                error_str = str(e)
-                if "leverage not modified" in error_str:
-                    logger.warning(f"Leverage already set or cannot be modified: {e}")
-                    # Continue execution instead of raising the error
+                if "leverage not modified" in str(e):
+                    logger.warning(f"Leverage already set: {e}")
                 else:
-                    raise  # Re-raise if it's a different error
+                    raise
             
             # Set margin mode to cross margin
             self.bybit.set_margin_mode('cross', self.symbol)
             logger.info("Margin mode set to cross")
             
-            # Set position mode to hedge mode (allows both long and short)
+            # Set position mode to hedge mode
             try:
-                self.bybit.set_position_mode(True, self.symbol)  # True = hedge mode
+                self.bybit.set_position_mode(True, self.symbol)
                 logger.info("Position mode set to hedge")
             except Exception as e:
                 logger.warning(f"Could not set hedge mode: {e}")
@@ -119,79 +581,218 @@ class FuturesGridTrader:
             logger.error(f"Error setting up leverage/margin: {e}")
             raise
     
-    def get_market_data(self) -> Dict:
-        """Get current market data"""
+    def place_enhanced_grid_orders(self) -> None:
+        """Place enhanced grid orders with optimal execution"""
         try:
-            ticker = self.bybit.fetch_ticker(self.symbol)
-            funding_rate = self.bybit.fetch_funding_rate(self.symbol)
+            orders = self.setup_enhanced_grid()
             
-            # In the get_market_data method, add this code at the end before the return statement
+            # Sort orders by priority (closer levels first)
+            orders.sort(key=lambda x: x['priority'], reverse=True)
             
-            market_data = {
-                'price': ticker['last'],
-                'bid': ticker['bid'],
-                'ask': ticker['ask'],
-                'volume': ticker['baseVolume'],
-                'funding_rate': funding_rate['fundingRate'],
-                'funding_time': funding_rate['fundingDatetime']
-            }
+            placed_orders = 0
+            failed_orders = 0
             
-            # Store price in history
-            self.price_history.append(market_data['price'])
+            for order in orders:
+                try:
+                    # Determine position index
+                    position_idx = 1 if order['side'] == 'buy' else 2
+                    
+                    # Place maker order
+                    result = self.bybit.create_limit_order(
+                        symbol=self.symbol,
+                        side=order['side'],
+                        amount=order['size'],
+                        price=order['price'],
+                        params={
+                            'timeInForce': 'GTC',
+                            'postOnly': True,  # Ensure maker order
+                            'positionIdx': position_idx
+                        }
+                    )
+                    
+                    self.active_orders[result['id']] = {
+                        'order_id': result['id'],
+                        'side': order['side'],
+                        'price': order['price'],
+                        'size': order['size'],
+                        'level': order['level'],
+                        'type': order['type'],
+                        'priority': order['priority'],
+                        'timestamp': datetime.now()
+                    }
+                    
+                    logger.info(f"Enhanced order placed: {order['side']} {order['size']:.4f} @ ${order['price']:.4f} (L{order['level']})")
+                    placed_orders += 1
+                    time.sleep(0.05)  # Reduced delay for faster execution
+                    
+                except Exception as e:
+                    logger.error(f"Error placing order: {e}")
+                    failed_orders += 1
+                    
+                    # If too many failures, stop placing orders
+                    if failed_orders > 3:
+                        logger.warning("Too many order failures, stopping placement")
+                        break
             
-            # Keep history at a reasonable size
-            if len(self.price_history) > 1000:
-                self.price_history = self.price_history[-1000:]
-                
-            return market_data
+            logger.info(f"Enhanced grid placement complete: {placed_orders} orders placed, {failed_orders} failed")
+            
         except Exception as e:
-            logger.error(f"Error fetching market data: {e}")
+            logger.error(f"Error placing enhanced grid orders: {e}")
             raise
     
-    def forecast_volatility_garch(self, days: int = 7) -> float:
-        """Forecast volatility using GARCH model"""
+    def monitor_and_replace_orders(self) -> None:
+        """Enhanced order monitoring and replacement"""
         try:
-            # Get historical data
-            ohlcv = self.bybit.fetch_ohlcv(self.symbol, '1h', limit=days*24)
-            prices = np.array([candle[4] for candle in ohlcv])
-            returns = 100 * np.diff(np.log(prices))
+            # Get current market data
+            market_data = asyncio.run(self.get_enhanced_market_data())
             
-            # Skip if not enough data
-            if len(returns) < 30:
-                return self.calculate_volatility(days)
+            # Check for filled orders
+            filled_order_ids = []
+            open_orders = self.bybit.fetch_open_orders(self.symbol)
+            open_order_ids = {order['id'] for order in open_orders}
             
-            # Fit GARCH(1,1) model
-            model = arch_model(returns, vol='Garch', p=1, q=1)
-            model_fit = model.fit(disp='off')
+            for order_id, order_info in self.active_orders.items():
+                if order_id not in open_order_ids:
+                    try:
+                        # Get filled order details
+                        closed_orders = self.bybit.fetch_closed_orders(self.symbol, limit=5)
+                        filled_order = next((o for o in closed_orders if o['id'] == order_id), None)
+                        
+                        if filled_order and filled_order['status'] == 'closed':
+                            filled_order_ids.append(order_id)
+                            
+                            # Update order info with actual fill data
+                            order_info['fill_price'] = filled_order['average']
+                            order_info['fill_amount'] = filled_order['filled']
+                            order_info['fees'] = filled_order.get('fee', {}).get('cost', 0)
+                            
+                            self.filled_orders.append(order_info)
+                            self.trades_count += 1
+                            
+                            # Calculate profit
+                            profit = self.calculate_enhanced_profit(order_info, market_data)
+                            self.total_profit += profit
+                            
+                            logger.info(f"Order filled: {order_info['side']} {order_info['size']:.4f} @ ${order_info.get('fill_price', order_info['price']):.4f} | Profit: ${profit:.4f}")
+                            
+                            # Place intelligent replacement
+                            self.place_intelligent_replacement(order_info, market_data)
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing filled order {order_id}: {e}")
             
-            # Forecast volatility
-            forecast = model_fit.forecast(horizon=24)
-            forecasted_var = forecast.variance.iloc[-1].values[0]
-            forecasted_vol = np.sqrt(forecasted_var)
-            
-            # Convert to daily volatility
-            daily_vol = forecasted_vol * np.sqrt(24) / 100
-            
-            logger.info(f"GARCH forecasted volatility: {daily_vol:.4f}")
-            return daily_vol
-            
+            # Remove filled orders
+            for order_id in filled_order_ids:
+                del self.active_orders[order_id]
+                
         except Exception as e:
-            logger.error(f"Error forecasting volatility with GARCH: {e}")
-            # Fallback to traditional volatility calculation
-            return self.calculate_volatility(days)
+            logger.error(f"Error monitoring orders: {e}")
     
-    def calculate_volatility(self, days: int = 7) -> float:
-        """Calculate daily volatility from historical data"""
+    def calculate_enhanced_profit(self, order_info: Dict, market_data: Dict) -> float:
+        """Calculate profit with all costs included"""
         try:
-            ohlcv = self.bybit.fetch_ohlcv(self.symbol, '1h', limit=days*24)
-            prices = [candle[4] for candle in ohlcv]
-            returns = np.diff(np.log(prices))
-            daily_volatility = np.std(returns) * np.sqrt(24)
-            logger.info(f"Calculated volatility: {daily_volatility:.4f}")
-            return daily_volatility
+            fill_price = order_info.get('fill_price', order_info['price'])
+            size = order_info.get('fill_amount', order_info['size'])
+            fees = order_info.get('fees', 0)
+            
+            # Base profit from grid spacing
+            notional_value = size * fill_price
+            expected_profit = notional_value * 0.003  # Expected grid profit
+            
+            # Subtract actual fees paid
+            net_profit = expected_profit - abs(fees)
+            
+            # Add maker rebate if applicable (estimated)
+            if order_info.get('fees', 0) < 0:  # Negative fees = rebate
+                self.maker_rebates += abs(fees)
+            
+            return net_profit
+            
         except Exception as e:
-            logger.error(f"Error calculating volatility: {e}")
-            return 0.02  # Default 2% volatility
+            logger.error(f"Error calculating enhanced profit: {e}")
+            return 0.0
+    
+    def place_intelligent_replacement(self, filled_order: Dict, market_data: Dict) -> None:
+        """Place intelligent replacement order based on market conditions"""
+        try:
+            # Get current market analysis
+            ob_analysis = self.analyze_orderbook_imbalance(self.orderbook_history[-1]) if self.orderbook_history else {}
+            flow_analysis = self.analyze_trade_flow()
+            
+            if filled_order['side'] == 'buy':
+                # Buy order filled, place sell order
+                new_side = 'sell'
+                position_idx = 2
+                
+                # Intelligent pricing based on market conditions
+                base_price = filled_order.get('fill_price', filled_order['price'])
+                
+                # Adjust based on orderbook imbalance
+                imbalance = ob_analysis.get('imbalance_ratio', 0)
+                if imbalance > 0.2:  # Strong bid support
+                    price_adjustment = 1.002  # Slightly more aggressive
+                else:
+                    price_adjustment = 1.003  # Standard grid spacing
+                
+                new_price = base_price * price_adjustment
+                
+            else:
+                # Sell order filled, place buy order
+                new_side = 'buy'
+                position_idx = 1
+                
+                base_price = filled_order.get('fill_price', filled_order['price'])
+                
+                # Adjust based on orderbook imbalance
+                imbalance = ob_analysis.get('imbalance_ratio', 0)
+                if imbalance < -0.2:  # Strong ask pressure
+                    price_adjustment = 0.998  # Slightly more aggressive
+                else:
+                    price_adjustment = 0.997  # Standard grid spacing
+                
+                new_price = base_price * price_adjustment
+            
+            # Calculate intelligent position size
+            new_size = self.calculate_position_size_kelly(new_price, new_side)
+            
+            # Check if we should reduce position
+            account_info = self.get_account_balance()
+            current_position = account_info.get('position_size', 0)
+            reduce_only = False
+            
+            if abs(current_position) > 0.001:
+                reduce_only = (current_position > 0 and new_side == 'sell') or \
+                             (current_position < 0 and new_side == 'buy')
+            
+            # Place replacement order
+            result = self.bybit.create_limit_order(
+                symbol=self.symbol,
+                side=new_side,
+                amount=new_size,
+                price=new_price,
+                params={
+                    'timeInForce': 'GTC',
+                    'postOnly': True,
+                    'positionIdx': position_idx,
+                    'reduceOnly': reduce_only
+                }
+            )
+            
+            self.active_orders[result['id']] = {
+                'order_id': result['id'],
+                'side': new_side,
+                'price': new_price,
+                'size': new_size,
+                'level': filled_order['level'],
+                'type': 'intelligent_replacement',
+                'reduce_only': reduce_only,
+                'timestamp': datetime.now()
+            }
+            
+            logger.info(f"Intelligent replacement: {new_side} {new_size:.4f} @ ${new_price:.4f} {'(reduceOnly)' if reduce_only else ''}")
+            
+        except Exception as e:
+            logger.error(f"Error placing intelligent replacement: {e}")
     
     def get_account_balance(self) -> Dict:
         """Get account balance and position info"""
@@ -203,482 +804,163 @@ class FuturesGridTrader:
             position_info = positions[0] if positions else {}
             
             self.current_position = position_info.get('contracts', 0)
-            self.liquidation_price = position_info.get('liquidationPrice')
-            
-            logger.info(f"USDT Balance: ${usdt_balance:.2f}")
-            logger.info(f"Current Position: {self.current_position}")
             
             return {
                 'balance': usdt_balance,
                 'position_size': self.current_position,
-                'liquidation_price': self.liquidation_price,
-                'unrealized_pnl': position_info.get('unrealizedPnl', 0)
+                'liquidation_price': position_info.get('liquidationPrice'),
+                'unrealized_pnl': position_info.get('unrealizedPnl', 0),
+                'margin_ratio': position_info.get('marginRatio', 0)
             }
         except Exception as e:
             logger.error(f"Error fetching balance: {e}")
-            return {'balance': 0.0, 'position_size': 0, 'liquidation_price': None}
+            return {'balance': 0.0, 'position_size': 0, 'liquidation_price': None, 'unrealized_pnl': 0, 'margin_ratio': 0}
     
-    def calculate_position_size(self, price: float, side: str) -> float:
-        """Calculate position size based on capital and leverage"""
+    def calculate_sharpe_ratio(self) -> float:
+        """Calculate Sharpe ratio from daily PnL"""
         try:
-            # Calculate notional value per grid level
-            capital_per_level = self.capital / (self.grid_levels * 2)
-            
-            # Apply leverage
-            leveraged_capital = capital_per_level * self.leverage
-            
-            # Calculate position size in contracts
-            position_size = leveraged_capital / price
-            
-            # Apply maximum position ratio
-            max_size = (self.capital * self.leverage * self.max_position_ratio) / price
-            position_size = min(position_size, max_size / (self.grid_levels * 2))
-            
-            return position_size
-        except Exception as e:
-            logger.error(f"Error calculating position size: {e}")
-            return 0.0
-    
-    def setup_grid(self) -> List[Dict]:
-        """Setup grid parameters and create order list"""
-        market_data = self.get_market_data()
-        
-        # Update price history for Z-score calculation
-        self.price_history.append(market_data['price'])
-        if len(self.price_history) > 100:  # Limit history size
-            self.price_history = self.price_history[-100:]
-        
-        # Use GARCH for volatility forecasting
-        volatility = self.forecast_volatility_garch()
-        
-        self.base_price = market_data['price']
-        
-        # Dynamic grid spacing based on GARCH volatility forecast
-        self.grid_spacing = max(
-            volatility * 0.3,  # 30% of forecasted volatility
-            self.min_grid_spacing  # Minimum spacing
-        )
-        
-        logger.info(f"Base Price: ${self.base_price:.2f}")
-        logger.info(f"Grid Spacing: {self.grid_spacing:.4f} ({self.grid_spacing*100:.2f}%)")
-        logger.info(f"Funding Rate: {market_data['funding_rate']:.6f}")
-        
-        # Create grid orders
-        orders = self.create_grid_orders()
-        
-        # Adjust orders based on Z-score mean reversion
-        adjusted_orders = self.adjust_grid_based_on_z_score(orders)
-        
-        return adjusted_orders
-    
-    def create_grid_orders(self) -> List[Dict]:
-        """Create grid buy and sell orders for futures"""
-        orders = []
-        
-        for i in range(1, self.grid_levels + 1):
-            # Buy orders below current price (long positions)
-            buy_price = self.base_price * (1 - self.grid_spacing * i)
-            buy_size = self.calculate_position_size(buy_price, 'buy')
-            
-            # Sell orders above current price (short positions)
-            sell_price = self.base_price * (1 + self.grid_spacing * i)
-            sell_size = self.calculate_position_size(sell_price, 'sell')
-            
-            orders.append({
-                'side': 'buy',
-                'price': buy_price,
-                'size': buy_size,
-                'level': i,
-                'type': 'grid'
-            })
-            
-            orders.append({
-                'side': 'sell',
-                'price': sell_price,
-                'size': sell_size,
-                'level': i,
-                'type': 'grid'
-            })
-        
-        return orders
-    
-    def place_grid_orders(self) -> None:
-        """Place all grid orders"""
-        orders = self.setup_grid()
-        placed_orders = 0
-        
-        for order in orders:
-            try:
-                # Add position index parameter based on side
-                position_idx = 1 if order['side'] == 'buy' else 2  # 1 for long, 2 for short in hedge mode
-                # For one-way mode, use position_idx = 0
-                
-                result = self.bybit.create_limit_order(
-                    symbol=self.symbol,
-                    side=order['side'],
-                    amount=order['size'],
-                    price=order['price'],
-                    params={
-                        'timeInForce': 'GTC',  # Good Till Cancelled
-                        'postOnly': True,  # Maker only orders
-                        'positionIdx': position_idx  # Add position index
-                    }
-                )
-                
-                self.active_orders[result['id']] = {
-                    'order_id': result['id'],
-                    'side': order['side'],
-                    'price': order['price'],
-                    'size': order['size'],
-                    'level': order['level'],
-                    'type': order['type'],
-                    'timestamp': datetime.now()
-                }
-                
-                logger.info(f"Placed {order['side']} order: {order['size']:.4f} @ ${order['price']:.2f}")
-                placed_orders += 1
-                time.sleep(0.1)  # Rate limit protection
-                
-            except Exception as e:
-                logger.error(f"Error placing order: {e}")
-        
-        logger.info(f"Successfully placed {placed_orders} orders")
-    
-    def check_filled_orders(self) -> None:
-        """Check for filled orders and place replacements"""
-        filled_order_ids = []
-        
-        try:
-            # Get all open orders in one call
-            open_orders = self.bybit.fetch_open_orders(self.symbol)
-            open_order_ids = {order['id'] for order in open_orders}
-            
-            # Check which orders from our tracking are no longer open
-            for order_id, order_info in self.active_orders.items():
-                if order_id not in open_order_ids:
-                    try:
-                        # Try to get the closed order details
-                        order_status = self.bybit.fetch_closed_orders(self.symbol, limit=1, params={'orderId': order_id})
-                        
-                        if order_status and len(order_status) > 0 and order_status[0]['status'] == 'closed':
-                            filled_order_ids.append(order_id)
-                            self.filled_orders.append(order_info)
-                            self.trades_count += 1
-                            
-                            # Update position tracking
-                            if order_info['side'] == 'buy':
-                                self.current_position += order_info['size']
-                            else:
-                                self.current_position -= order_info['size']
-                            
-                            # Calculate profit (simplified)
-                            profit = self.calculate_trade_profit(order_info)
-                            self.total_profit += profit
-                            
-                            logger.info(f"Order filled: {order_info['side']} {order_info['size']:.4f} @ ${order_info['price']:.2f} | Profit: ${profit:.2f}")
-                            
-                            # Place replacement order on opposite side
-                            self.place_replacement_order(order_info)
-                    except Exception as e:
-                        logger.error(f"Error checking closed order {order_id}: {e}")
-        except Exception as e:
-            logger.error(f"Error fetching open orders: {e}")
-        
-        # Remove filled orders from active orders
-        for order_id in filled_order_ids:
-            del self.active_orders[order_id]
-    
-    def calculate_trade_profit(self, order_info: Dict) -> float:
-        """Calculate profit from a single trade"""
-        # For futures, profit depends on price movement and leverage
-        notional_value = order_info['size'] * order_info['price']
-        profit = notional_value * self.grid_spacing * self.leverage
-        
-        # Account for trading fees (approximately 0.1% for maker orders)
-        trading_fee = notional_value * 0.001
-        return profit - trading_fee
-    
-    def place_replacement_order(self, filled_order: Dict) -> None:
-        """Place replacement order after a fill"""
-        try:
-            # Calculate replacement order parameters
-            if filled_order['side'] == 'buy':
-                # If buy order filled, place sell order above
-                new_price = filled_order['price'] * (1 + self.grid_spacing)
-                new_side = 'sell'
-                position_idx = 2  # Short position
-            else:
-                # If sell order filled, place buy order below
-                new_price = filled_order['price'] * (1 - self.grid_spacing)
-                new_side = 'buy'
-                position_idx = 1  # Long position
-            
-            # Calculate new position size
-            new_size = self.calculate_position_size(new_price, new_side)
-            
-            # Determine if this order should be reduceOnly
-            # In place_replacement_order method
-            # Get latest position before deciding on reduceOnly
-            account_info = self.get_account_balance()
-            current_position = account_info['position_size']
-            
-            # Only set reduceOnly if we actually have a position
-            reduce_only = False
-            if abs(current_position) > 0.00001:  # Non-zero position
-                reduce_only = (current_position > 0 and new_side == 'sell') or \
-                             (current_position < 0 and new_side == 'buy')
-            
-            # Place new order
-            result = self.bybit.create_limit_order(
-                symbol=self.symbol,
-                side=new_side,
-                amount=new_size,
-                price=new_price,
-                params={
-                    'timeInForce': 'GTC',
-                    'postOnly': True,
-                    'positionIdx': position_idx,  # Add position index
-                    'reduceOnly': reduce_only  # Add reduceOnly parameter when appropriate
-                }
-            )
-            
-            self.active_orders[result['id']] = {
-                'order_id': result['id'],
-                'side': new_side,
-                'price': new_price,
-                'size': new_size,
-                'level': filled_order['level'],
-                'type': 'replacement',
-                'reduce_only': reduce_only,  # Track if this is a reduceOnly order
-                'timestamp': datetime.now()
-            }
-            
-            logger.info(f"Replacement order: {new_side} {new_size:.4f} @ ${new_price:.2f} {'(reduceOnly)' if reduce_only else ''}")
-            
-        except Exception as e:
-            logger.error(f"Error placing replacement order: {e}")
-    
-    def calculate_unrealized_pnl(self) -> float:
-        """Calculate unrealized PnL from current position"""
-        try:
-            if self.current_position == 0:
+            if len(self.daily_pnl_history) < 7:
                 return 0.0
             
-            current_price = self.get_market_data()['price']
+            daily_returns = list(self.daily_pnl_history)
+            avg_return = np.mean(daily_returns)
+            std_return = np.std(daily_returns)
             
-            # Calculate PnL based on position and price movement
-            if self.current_position > 0:  # Long position
-                avg_entry_price = sum(order['price'] for order in self.filled_orders 
-                                    if order['side'] == 'buy') / len([o for o in self.filled_orders if o['side'] == 'buy'])
-                pnl = self.current_position * (current_price - avg_entry_price)
-            else:  # Short position
-                avg_entry_price = sum(order['price'] for order in self.filled_orders 
-                                    if order['side'] == 'sell') / len([o for o in self.filled_orders if o['side'] == 'sell'])
-                pnl = abs(self.current_position) * (avg_entry_price - current_price)
+            if std_return == 0:
+                return 0.0
             
-            return pnl * self.leverage
+            # Annualized Sharpe ratio (assuming 365 trading days)
+            sharpe = (avg_return / std_return) * np.sqrt(365)
+            return sharpe
+            
         except Exception as e:
-            logger.error(f"Error calculating unrealized PnL: {e}")
+            logger.error(f"Error calculating Sharpe ratio: {e}")
             return 0.0
     
-    def get_funding_fees(self) -> float:
-        """Get funding fees paid/received"""
+    def calculate_max_drawdown(self, current_equity: float) -> float:
+        """Calculate maximum drawdown"""
         try:
-            # This would require fetching funding history from the exchange
-            # For now, return accumulated funding fees
-            return self.funding_fees
+            self.peak_equity = max(self.peak_equity, current_equity)
+            current_drawdown = (self.peak_equity - current_equity) / self.peak_equity
+            self.max_drawdown = max(self.max_drawdown, current_drawdown)
+            return current_drawdown
+            
         except Exception as e:
-            logger.error(f"Error getting funding fees: {e}")
+            logger.error(f"Error calculating drawdown: {e}")
             return 0.0
     
-    def check_liquidation_risk(self) -> bool:
-        """Check if position is at risk of liquidation"""
+    def risk_management_check(self) -> Dict:
+        """Comprehensive risk management check"""
         try:
             account_info = self.get_account_balance()
-            current_price = self.get_market_data()['price']
+            current_equity = account_info['balance'] + account_info.get('unrealized_pnl', 0)
             
-            if account_info['liquidation_price']:
-                distance_to_liquidation = abs(current_price - account_info['liquidation_price']) / current_price
-                
-                if distance_to_liquidation < 0.1:  # Less than 10% from liquidation
-                    logger.warning(f"LIQUIDATION RISK: Current price ${current_price:.2f}, Liquidation price ${account_info['liquidation_price']:.2f}")
-                    return True
+            # Calculate risk metrics
+            current_drawdown = self.calculate_max_drawdown(current_equity)
+            margin_ratio = account_info.get('margin_ratio', 0)
+            sharpe_ratio = self.calculate_sharpe_ratio()
             
-            return False
-        except Exception as e:
-            logger.error(f"Error checking liquidation risk: {e}")
-            return False
-    
-    def calculate_var(self) -> Dict:
-        """Calculate Value at Risk (VaR) using historical method"""
-        try:
-            # Need sufficient price history
-            if len(self.price_history) < 30:
-                return {'var': 0.0, 'var_pct': 0.0, 'cvar': 0.0}
-                
-            # Calculate returns
-            prices = np.array(self.price_history)
-            returns = np.diff(np.log(prices)) * 100  # Percentage returns
+            # Risk flags
+            risk_flags = []
             
-            # Calculate VaR
-            var_percentile = 100 - (self.var_confidence * 100)
-            var_return = np.percentile(returns, var_percentile)  # Negative return at confidence level
+            # Drawdown check
+            if current_drawdown > 0.15:  # 15% drawdown
+                risk_flags.append('HIGH_DRAWDOWN')
             
-            # Calculate CVaR (Conditional VaR or Expected Shortfall)
-            # CVaR is the expected loss exceeding VaR
-            cvar_returns = returns[returns <= var_return]
-            cvar_return = np.mean(cvar_returns) if len(cvar_returns) > 0 else var_return
+            # Margin ratio check
+            if margin_ratio > 0.8:  # 80% margin usage
+                risk_flags.append('HIGH_MARGIN_USAGE')
             
-            # Convert to dollar amounts
-            current_value = self.capital * self.leverage
-            var_amount = current_value * abs(var_return) / 100 * np.sqrt(self.var_days)
-            cvar_amount = current_value * abs(cvar_return) / 100 * np.sqrt(self.var_days)
-            var_pct = (var_amount / self.capital) * 100
+            # Position size check
+            position_value = abs(self.current_position) * account_info.get('position_size', 0)
+            if position_value > self.capital * self.leverage * 0.9:
+                risk_flags.append('OVERSIZED_POSITION')
+            
+            # Liquidation distance check
+            liq_price = account_info.get('liquidation_price')
+            if liq_price:
+                current_price = list(self.price_history)[-1] if self.price_history else 0
+                if current_price > 0:
+                    liq_distance = abs(current_price - liq_price) / current_price
+                    if liq_distance < 0.05:  # Less than 5% from liquidation
+                        risk_flags.append('LIQUIDATION_RISK')
             
             return {
-                'var': var_amount,
-                'var_pct': var_pct,
-                'cvar': cvar_amount
+                'current_drawdown': current_drawdown,
+                'max_drawdown': self.max_drawdown,
+                'margin_ratio': margin_ratio,
+                'sharpe_ratio': sharpe_ratio,
+                'risk_flags': risk_flags,
+                'equity': current_equity
             }
             
         except Exception as e:
-            logger.error(f"Error calculating VaR: {e}")
-            return {'var': 0.0, 'var_pct': 0.0, 'cvar': 0.0}
+            logger.error(f"Error in risk management check: {e}")
+            return {'risk_flags': ['ERROR']}
     
-    def check_risk_limits(self) -> bool:
-        """Check if risk limits are exceeded"""
+    def get_enhanced_portfolio_status(self) -> Dict:
+        """Get comprehensive portfolio status"""
         try:
-            # Only check risk limits if we have an active position
-            if abs(self.current_position) < 0.00001:  # Effectively zero position
-                return False
-                
-            # Calculate VaR
-            var_metrics = self.calculate_var()
-            
-            # Check if VaR exceeds threshold (e.g., 10% of capital)
-            var_limit = 0.60  # 10% of capital as maximum acceptable VaR
-            var_exceeded = var_metrics['var_pct'] > (var_limit * 100)
-            
-            if var_exceeded:
-                logger.warning(f"VaR limit exceeded: {var_metrics['var_pct']:.2f}% > {var_limit*100:.2f}%")
-                
-            return var_exceeded
-            
-        except Exception as e:
-            logger.error(f"Error checking risk limits: {e}")
-            return False
-    
-    def get_portfolio_status(self) -> Dict:
-        """Get current portfolio status"""
-        try:
-            market_data = self.get_market_data()
+            # Get basic account info
             account_info = self.get_account_balance()
-            current_price = market_data['price']
+            market_data = asyncio.run(self.get_enhanced_market_data()) if self.price_history else {}
             
-            price_change = (current_price - self.base_price) / self.base_price if self.base_price else 0
-            unrealized_pnl = self.calculate_unrealized_pnl()
-            funding_fees = self.get_funding_fees()
+            current_price = market_data.get('price', 0)
+            funding_rate = market_data.get('funding_rate', 0)
             
-            # Calculate VaR
-            var_metrics = self.calculate_var()
+            # Calculate performance metrics
+            current_equity = account_info['balance'] + account_info.get('unrealized_pnl', 0)
+            total_return = (current_equity - self.capital) / self.capital * 100
+            
+            # Risk metrics
+            risk_metrics = self.risk_management_check()
+            
+            # Trading metrics
+            if self.trades_count > 0:
+                avg_profit_per_trade = self.total_profit / self.trades_count
+                win_rate = len([o for o in self.filled_orders if o.get('profit', 0) > 0]) / len(self.filled_orders) if self.filled_orders else 0
+            else:
+                avg_profit_per_trade = 0
+                win_rate = 0
+            
+            # Funding rate analysis
+            funding_collected = self.funding_fees_collected
+            estimated_daily_funding = funding_rate * abs(self.current_position) * current_price * 3  # 3 times per day
             
             return {
+                'timestamp': datetime.now(),
                 'current_price': current_price,
-                'base_price': self.base_price,
-                'price_change_pct': price_change * 100,
+                'funding_rate': funding_rate,
+                'volatility_regime': self.volatility_regime,
+                'market_regime': self.market_regime,
                 'active_orders': len(self.active_orders),
-                'filled_orders': len(self.filled_orders),
                 'total_trades': self.trades_count,
                 'current_position': self.current_position,
-                'realized_profit': self.total_profit,
-                'unrealized_pnl': unrealized_pnl,
-                'funding_fees': funding_fees,
-                'total_pnl': self.total_profit + unrealized_pnl + funding_fees,
-                'liquidation_price': account_info.get('liquidation_price'),
-                'funding_rate': market_data['funding_rate'],
                 'account_balance': account_info['balance'],
-                'var': var_metrics['var'],
-                'var_pct': var_metrics['var_pct'],
-                'cvar': var_metrics['cvar']
+                'unrealized_pnl': account_info.get('unrealized_pnl', 0),
+                'realized_profit': self.total_profit,
+                'total_equity': current_equity,
+                'total_return_pct': total_return,
+                'funding_collected': funding_collected,
+                'estimated_daily_funding': estimated_daily_funding,
+                'maker_rebates': self.maker_rebates,
+                'avg_profit_per_trade': avg_profit_per_trade,
+                'win_rate': win_rate,
+                'sharpe_ratio': risk_metrics.get('sharpe_ratio', 0),
+                'max_drawdown': risk_metrics.get('max_drawdown', 0),
+                'current_drawdown': risk_metrics.get('current_drawdown', 0),
+                'margin_ratio': risk_metrics.get('margin_ratio', 0),
+                'liquidation_price': account_info.get('liquidation_price'),
+                'risk_flags': risk_metrics.get('risk_flags', [])
             }
+            
         except Exception as e:
-            logger.error(f"Error getting portfolio status: {e}")
+            logger.error(f"Error getting enhanced portfolio status: {e}")
             return {}
-    
-    def monitor_grid(self) -> bool:
-        """Monitor grid and check if adjustment is needed"""
-        status = self.get_portfolio_status()
-        
-        # Check liquidation risk
-        liquidation_risk = self.check_liquidation_risk()
-        
-        # Check VaR risk limits
-        var_risk_exceeded = self.check_risk_limits()
-        
-        logger.info("=" * 60)
-        logger.info(f"Current Price: ${status.get('current_price', 0):.2f}")
-        logger.info(f"Price Change: {status.get('price_change_pct', 0):.2f}%")
-        logger.info(f"Active Orders: {status.get('active_orders', 0)}")
-        logger.info(f"Current Position: {status.get('current_position', 0):.4f}")
-        logger.info(f"Total Trades: {status.get('total_trades', 0)}")
-        logger.info(f"Realized Profit: ${status.get('realized_profit', 0):.2f}")
-        logger.info(f"Unrealized PnL: ${status.get('unrealized_pnl', 0):.2f}")
-        logger.info(f"Funding Fees: ${status.get('funding_fees', 0):.2f}")
-        logger.info(f"Total PnL: ${status.get('total_pnl', 0):.2f}")
-        logger.info(f"Funding Rate: {status.get('funding_rate', 0):.6f}")
-        logger.info(f"VaR ({self.var_confidence*100}%, {self.var_days}d): ${status.get('var', 0):.2f} ({status.get('var_pct', 0):.2f}%)")
-        logger.info(f"CVaR (Expected Shortfall): ${status.get('cvar', 0):.2f}")
-        
-        # Fix for the TypeError - Check if liquidation_price is None
-        liq_price = status.get('liquidation_price')
-        if liq_price is not None:
-            logger.info(f"Liquidation Price: ${liq_price:.2f}")
-        else:
-            logger.info("Liquidation Price: Not available")
-            
-        logger.info(f"Account Balance: ${status.get('account_balance', 0):.2f}")
-        if liquidation_risk:
-            logger.warning("LIQUIDATION RISK DETECTED!")
-        if var_risk_exceeded:
-            logger.warning("VAR RISK LIMIT EXCEEDED!")
-        logger.info("=" * 60)
-        
-        # Check if grid needs adjustment
-        if abs(status.get('price_change_pct', 0)) > 25:  # 25% price movement
-            logger.warning("Price moved significantly, grid adjustment recommended")
-            return True
-        
-        if liquidation_risk or var_risk_exceeded:
-            logger.error("RISK LIMIT EXCEEDED: Action required!")
-            return True
-        
-        return False
-    
-    def emergency_close_position(self) -> None:
-        """Emergency close all positions"""
-        try:
-            logger.warning("EMERGENCY: Closing all positions")
-            
-            # Cancel all orders first
-            self.cancel_all_orders()
-            
-            # Close position if any
-            if abs(self.current_position) > 0:
-                side = 'sell' if self.current_position > 0 else 'buy'
-                self.bybit.create_market_order(
-                    symbol=self.symbol,
-                    side=side,
-                    amount=abs(self.current_position)
-                )
-                logger.info(f"Emergency position closed: {side} {abs(self.current_position):.4f}")
-                
-        except Exception as e:
-            logger.error(f"Error in emergency close: {e}")
     
     def cancel_all_orders(self) -> None:
         """Cancel all active orders"""
         cancelled_count = 0
-        
         for order_id in list(self.active_orders.keys()):
             try:
                 self.bybit.cancel_order(order_id, self.symbol)
@@ -689,298 +971,174 @@ class FuturesGridTrader:
         
         logger.info(f"Cancelled {cancelled_count} orders")
     
-    def save_state(self, filename: str = 'futures_grid_state.json') -> None:
-        """Save current state to file"""
-        state = {
-            'base_price': self.base_price,
-            'grid_spacing': self.grid_spacing,
-            'total_profit': self.total_profit,
-            'trades_count': self.trades_count,
-            'current_position': self.current_position,
-            'funding_fees': self.funding_fees,
-            'filled_orders': self.filled_orders,
-            'start_time': self.start_time.isoformat() if self.start_time else None,
-            'leverage': self.leverage
-        }
-        
+    def emergency_shutdown(self) -> None:
+        """Emergency shutdown with position closing"""
         try:
-            with open(filename, 'w') as f:
-                json.dump(state, f, indent=2, default=str)
-            logger.info(f"State saved to {filename}")
+            logger.warning("EMERGENCY SHUTDOWN INITIATED")
+            
+            # Cancel all orders
+            self.cancel_all_orders()
+            
+            # Close position if significant
+            if abs(self.current_position) > 0.001:
+                side = 'sell' if self.current_position > 0 else 'buy'
+                try:
+                    self.bybit.create_market_order(
+                        symbol=self.symbol,
+                        side=side,
+                        amount=abs(self.current_position)
+                    )
+                    logger.info(f"Emergency position closed: {side} {abs(self.current_position):.4f}")
+                except Exception as e:
+                    logger.error(f"Error closing position: {e}")
+                    
         except Exception as e:
-            logger.error(f"Error saving state: {e}")
+            logger.error(f"Error in emergency shutdown: {e}")
     
-    def load_state(self, filename: str = 'futures_grid_state.json') -> None:
-        """Load state from file"""
-        try:
-            with open(filename, 'r') as f:
-                state = json.load(f)
-            
-            self.base_price = state.get('base_price')
-            self.grid_spacing = state.get('grid_spacing')
-            self.total_profit = state.get('total_profit', 0.0)
-            self.trades_count = state.get('trades_count', 0)
-            self.current_position = state.get('current_position', 0.0)
-            self.funding_fees = state.get('funding_fees', 0.0)
-            self.filled_orders = state.get('filled_orders', [])
-            
-            if state.get('start_time'):
-                self.start_time = datetime.fromisoformat(state['start_time'])
-            
-            logger.info(f"State loaded from {filename}")
-        except FileNotFoundError:
-            logger.info("No previous state found, starting fresh")
-        except Exception as e:
-            logger.error(f"Error loading state: {e}")
-    
-    def run_grid_bot(self) -> None:
-        """Main trading loop"""
-        logger.info("Starting Futures Grid Trading Bot with Leverage...")
+    def run_enhanced_bot(self) -> None:
+        """Main enhanced trading loop"""
+        logger.info("Starting Enhanced Futures Grid Trading Bot...")
         self.is_running = True
         self.start_time = datetime.now()
         
-        # Load previous state if exists
-        self.load_state()
-        
         try:
-            # Setup leverage and margin
+            # Setup
             self.setup_leverage_and_margin()
             
-            # Check account balance
+            # Check account
             account_info = self.get_account_balance()
             if account_info['balance'] < self.capital:
                 logger.error(f"Insufficient balance: ${account_info['balance']:.2f} < ${self.capital:.2f}")
                 return
             
-            # Initial setup
-            self.place_grid_orders()
+            # Initial grid placement
+            self.place_enhanced_grid_orders()
             
-            # New line in the __init__ method, with the other state variables
-            self.price_history = []
-            
-            # Pre-load price history with historical data
-            try:
-                ohlcv = self.bybit.fetch_ohlcv(self.symbol, '1h', limit=100)
-                self.price_history = [candle[4] for candle in ohlcv]  # Use closing prices
-                logger.info(f"Pre-loaded {len(self.price_history)} historical price points")
-            except Exception as e:
-                logger.error(f"Error pre-loading price history: {e}")
-            
-            # Main trading loop
+            # Main loop
+            loop_count = 0
             while self.is_running:
                 try:
-                    # Check for filled orders
-                    self.check_filled_orders()
+                    loop_count += 1
                     
-                    # Monitor performance
-                    needs_adjustment = self.monitor_grid()
+                    # Monitor and replace orders
+                    self.monitor_and_replace_orders()
                     
-                    if needs_adjustment:
-                        # Check if it's liquidation risk
-                        if self.check_liquidation_risk():
-                            logger.error("LIQUIDATION RISK: Emergency shutdown!")
-                            self.emergency_close_position()
-                            break
-                        else:
-                            user_input = input("Grid adjustment recommended. Restart grid? (y/n): ")
-                            if user_input.lower() == 'y':
-                                logger.info("Restarting grid...")
-                                self.cancel_all_orders()
-                                time.sleep(5)
-                                self.place_grid_orders()
+                    # Get portfolio status
+                    status = self.get_enhanced_portfolio_status()
                     
-                    # Save state periodically
-                    self.save_state()
+                    # Risk management
+                    risk_flags = status.get('risk_flags', [])
                     
-                    # Sleep before next iteration
-                    time.sleep(30)  # Check every 30 seconds
+                    # Log status every 10 loops (5 minutes)
+                    if loop_count % 10 == 0:
+                        logger.info("=" * 80)
+                        logger.info(f"Enhanced Bot Status - Loop {loop_count}")
+                        logger.info(f"Price: ${status.get('current_price', 0):.4f} | Regime: {status.get('market_regime', 'unknown')}/{status.get('volatility_regime', 'unknown')}")
+                        logger.info(f"Active Orders: {status.get('active_orders', 0)} | Trades: {status.get('total_trades', 0)}")
+                        logger.info(f"Position: {status.get('current_position', 0):.4f} | Balance: ${status.get('account_balance', 0):.2f}")
+                        logger.info(f"Realized P&L: ${status.get('realized_profit', 0):.4f} | Unrealized: ${status.get('unrealized_pnl', 0):.4f}")
+                        logger.info(f"Total Return: {status.get('total_return_pct', 0):.2f}% | Sharpe: {status.get('sharpe_ratio', 0):.2f}")
+                        logger.info(f"Win Rate: {status.get('win_rate', 0):.1%} | Avg/Trade: ${status.get('avg_profit_per_trade', 0):.4f}")
+                        logger.info(f"Funding Rate: {status.get('funding_rate', 0):.6f} | Est. Daily: ${status.get('estimated_daily_funding', 0):.2f}")
+                        logger.info(f"Max DD: {status.get('max_drawdown', 0):.1%} | Current DD: {status.get('current_drawdown', 0):.1%}")
+                        if risk_flags:
+                            logger.warning(f"Risk Flags: {', '.join(risk_flags)}")
+                        logger.info("=" * 80)
+                    
+                    # Handle risk flags
+                    if 'LIQUIDATION_RISK' in risk_flags or 'HIGH_DRAWDOWN' in risk_flags:
+                        logger.error("CRITICAL RISK DETECTED - EMERGENCY SHUTDOWN")
+                        self.emergency_shutdown()
+                        break
+                    
+                    if 'HIGH_MARGIN_USAGE' in risk_flags:
+                        logger.warning("High margin usage - reducing grid size")
+                        # Could implement grid size reduction here
+                    
+                    # Adaptive grid refresh every hour
+                    if loop_count % 120 == 0:  # Every 60 minutes
+                        logger.info("Performing adaptive grid refresh...")
+                        self.cancel_all_orders()
+                        time.sleep(5)
+                        self.place_enhanced_grid_orders()
+                    
+                    # Update daily PnL tracking
+                    if loop_count % 2880 == 0:  # Every 24 hours
+                        daily_pnl = status.get('realized_profit', 0) + status.get('unrealized_pnl', 0)
+                        self.daily_pnl_history.append(daily_pnl)
+                    
+                    # Sleep
+                    time.sleep(30)  # 30 second intervals
                     
                 except KeyboardInterrupt:
-                    logger.info("Stopping bot...")
-                    self.stop_bot()
+                    logger.info("Keyboard interrupt - stopping bot...")
                     break
                 except Exception as e:
                     logger.error(f"Error in main loop: {e}")
-                    time.sleep(60)  # Wait 1 minute before retrying
+                    time.sleep(60)  # Wait 1 minute on error
                     
         except Exception as e:
-            logger.error(f"Fatal error: {e}")
+            logger.error(f"Fatal error in enhanced bot: {e}")
         finally:
             self.cleanup()
     
-    def stop_bot(self) -> None:
-        """Stop the bot gracefully"""
-        self.is_running = False
-        logger.info("Bot stop signal received")
-    
     def cleanup(self) -> None:
-        """Cleanup resources"""
-        logger.info("Cleaning up...")
+        """Cleanup and final reporting"""
+        logger.info("Enhanced bot cleanup...")
+        self.is_running = False
+        
+        # Cancel remaining orders
         self.cancel_all_orders()
-        self.save_state()
         
-        # Final status report
-        status = self.get_portfolio_status()
-        logger.info("Final Status:")
-        logger.info(f"Total Trades: {status.get('total_trades', 0)}")
-        logger.info(f"Final Position: {status.get('current_position', 0):.4f}")
-        logger.info(f"Total Profit: ${status.get('total_pnl', 0):.2f}")
+        # Final status
+        final_status = self.get_enhanced_portfolio_status()
         
-        if self.start_time:
-            runtime = datetime.now() - self.start_time
-            logger.info(f"Runtime: {runtime}")
-    # Add these methods to the FuturesGridTrader class, before the main() function
-# For example, place them after the update_returns_history method
+        logger.info("=" * 80)
+        logger.info("FINAL ENHANCED BOT REPORT")
+        logger.info("=" * 80)
+        logger.info(f"Runtime: {datetime.now() - self.start_time if self.start_time else 'Unknown'}")
+        logger.info(f"Total Trades: {final_status.get('total_trades', 0)}")
+        logger.info(f"Final Position: {final_status.get('current_position', 0):.4f}")
+        logger.info(f"Total Return: {final_status.get('total_return_pct', 0):.2f}%")
+        logger.info(f"Realized Profit: ${final_status.get('realized_profit', 0):.4f}")
+        logger.info(f"Unrealized P&L: ${final_status.get('unrealized_pnl', 0):.4f}")
+        logger.info(f"Funding Collected: ${final_status.get('funding_collected', 0):.4f}")
+        logger.info(f"Maker Rebates: ${final_status.get('maker_rebates', 0):.4f}")
+        logger.info(f"Win Rate: {final_status.get('win_rate', 0):.1%}")
+        logger.info(f"Sharpe Ratio: {final_status.get('sharpe_ratio', 0):.2f}")
+        logger.info(f"Max Drawdown: {final_status.get('max_drawdown', 0):.1%}")
+        logger.info("=" * 80)
 
-    def calculate_z_score(self) -> float:
-        """Calculate Z-score for mean reversion strategy"""
-        try:
-            # Add fallback if attribute is missing
-            z_score_window = getattr(self, 'z_score_window', 20)  # Default to 20 if missing
-            
-            # Need at least z_score_window data points
-            if len(self.price_history) < z_score_window:
-                return 0.0
-                
-            # Use recent price history based on window size
-            recent_prices = self.price_history[-z_score_window:]
-            
-            # Calculate mean and standard deviation
-            mean_price = np.mean(recent_prices)
-            std_price = np.std(recent_prices)
-            
-            # Avoid division by zero
-            if std_price == 0:
-                return 0.0
-                
-            # Calculate Z-score (current price's deviation from mean in std units)
-            current_price = self.price_history[-1]
-            z_score = (current_price - mean_price) / std_price
-            
-            logger.info(f"Current Z-score: {z_score:.2f}")
-            return z_score
-            
-        except Exception as e:
-            logger.error(f"Error calculating Z-score: {e}")
-            return 0.0
-    
-    def is_mean_reverting(self) -> bool:
-        """Test if the price series shows mean reversion properties"""
-        try:
-            # Need sufficient price history
-            if len(self.price_history) < 30:
-                return False
-                
-            # Perform Augmented Dickey-Fuller test for stationarity
-            # A stationary series is more likely to be mean-reverting
-            prices = np.array(self.price_history)
-            result = adfuller(prices)
-            
-            # p-value less than 0.05 suggests stationarity (reject unit root hypothesis)
-            p_value = result[1]
-            is_stationary = p_value < 0.05
-            
-            if is_stationary:
-                logger.info(f"Price series is stationary (p-value: {p_value:.4f}), likely mean-reverting")
-            else:
-                logger.info(f"Price series is not stationary (p-value: {p_value:.4f}), may not be mean-reverting")
-                
-            return is_stationary
-            
-        except Exception as e:
-            logger.error(f"Error testing for mean reversion: {e}")
-            return False
-    
-    def adjust_grid_based_on_z_score(self, orders: List[Dict]) -> List[Dict]:
-        """Adjust grid orders based on Z-score mean reversion signals"""
-        try:
-            # Calculate current Z-score
-            z_score = self.calculate_z_score()
-            
-            # If Z-score is near zero or we don't have enough data, no adjustment needed
-            if abs(z_score) < 0.5 or len(self.price_history) < self.z_score_window:
-                return orders
-                
-            # Check if price series is mean-reverting
-            if not self.is_mean_reverting():
-                logger.info("Price series not mean-reverting, using standard grid")
-                return orders
-                
-            adjusted_orders = []
-            
-            # Positive Z-score means price is above mean (potentially overbought)
-            # Negative Z-score means price is below mean (potentially oversold)
-            for order in orders:
-                # Deep copy the order to avoid modifying the original
-                adjusted_order = order.copy()
-                
-                # For high positive Z-score (overbought)
-                if z_score > self.z_score_threshold:
-                    if order['side'] == 'sell':  # Favor sell orders when overbought
-                        # Increase size for sell orders
-                        adjusted_order['size'] = order['size'] * 1.2
-                        logger.info(f"Increased sell order size due to high Z-score: {z_score:.2f}")
-                    else:  # Reduce buy orders when overbought
-                        adjusted_order['size'] = order['size'] * 0.8
-                        logger.info(f"Decreased buy order size due to high Z-score: {z_score:.2f}")
-                        
-                # For low negative Z-score (oversold)
-                elif z_score < -self.z_score_threshold:
-                    if order['side'] == 'buy':  # Favor buy orders when oversold
-                        # Increase size for buy orders
-                        adjusted_order['size'] = order['size'] * 1.2
-                        logger.info(f"Increased buy order size due to low Z-score: {z_score:.2f}")
-                    else:  # Reduce sell orders when oversold
-                        adjusted_order['size'] = order['size'] * 0.8
-                        logger.info(f"Decreased sell order size due to low Z-score: {z_score:.2f}")
-                        
-                adjusted_orders.append(adjusted_order)
-                
-            return adjusted_orders
-            
-        except Exception as e:
-            logger.error(f"Error adjusting grid based on Z-score: {e}")
-            return orders  # Return original orders if adjustment fails
 
 def main():
-    """Main function to run the futures grid trading bot"""
-    # Configuration
+    """Main function for enhanced futures grid trading"""
+    # Enhanced configuration
     CONFIG = {
-        'symbol': 'DOGE/USDT:USDT',  # Futures symbol format
+        'symbol': 'DOGE/USDT:USDT',
         'api_key': 'VDpt0WQXIjXul4OBrS',
         'secret': 'z1Rq4a7xfF8AmmAfCjqrJGECGsnjFQJLInH9',
-        'capital': 33,  # $35 capital
-        'leverage': 40,    # 50x leverage
-        'grid_levels': 8,  # 8 levels each side
-        'min_grid_spacing': 0.005,  # 0.5% minimum spacing for futures
-        'use_testnet': False,  # Use testnet for testing
-        'z_score_window': 20,  # Window for Z-score calculation
-        'z_score_threshold': 2.0,  # Z-score threshold for mean reversion
-        'var_confidence': 0.95,  # 95% confidence for VaR
-        'var_days': 1  # 1-day VaR
+        'capital': 42,
+        'leverage': 50,
+        'base_grid_levels': 8,
+        'use_testnet': False,
+        'max_position_ratio': 0.9
     }
     
-    # Create and run futures grid trader
-    grid_trader = FuturesGridTrader(
+    # Create enhanced trader
+    enhanced_trader = EnhancedFuturesGridTrader(
         symbol=CONFIG['symbol'],
         api_key=CONFIG['api_key'],
         secret=CONFIG['secret'],
         capital=CONFIG['capital'],
         leverage=CONFIG['leverage'],
-        grid_levels=CONFIG['grid_levels'],
-        min_grid_spacing=CONFIG['min_grid_spacing'],
+        base_grid_levels=CONFIG['base_grid_levels'],
         use_testnet=CONFIG['use_testnet'],
-        z_score_window=CONFIG['z_score_window'],
-        z_score_threshold=CONFIG['z_score_threshold'],
-        var_confidence=CONFIG['var_confidence'],
-        var_days=CONFIG['var_days']
+        max_position_ratio=CONFIG['max_position_ratio']
     )
     
-    # Run the bot
-    grid_trader.run_grid_bot()
+    # Run enhanced bot
+    enhanced_trader.run_enhanced_bot()
 
 
 if __name__ == "__main__":
     main()
-
-
