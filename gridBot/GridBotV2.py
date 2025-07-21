@@ -27,7 +27,7 @@ class BybitGridBot:
             testnet: Use testnet (True) or mainnet (False)
         """
         self.symbol = symbol
-        self.leverage = 75
+        self.leverage = 50
         
         # Initialize exchange
         self.exchange = ccxt.bybit({
@@ -1065,7 +1065,7 @@ if __name__ == "__main__":
     API_SECRET = "z1Rq4a7xfF8AmmAfCjqrJGECGsnjFQJLInH9"
     
     # Only need to specify investment amount - grid parameters are calculated automatically
-    TOTAL_INVESTMENT = 36  # Total USDT to use
+    TOTAL_INVESTMENT = 122  # Total USDT to use
     
     # Initialize bot
     bot = BybitGridBot(
