@@ -1115,10 +1115,10 @@ def main():
     # Enhanced configuration
     CONFIG = {
         'symbol': 'DOGE/USDT:USDT',
-        'api_key': 'VDpt0WQXIjXul4OBrS',
-        'secret': 'z1Rq4a7xfF8AmmAfCjqrJGECGsnjFQJLInH9',
-        'capital': 42,
-        'leverage': 50,
+        'api_key': 'aPeo9so1VKnQt2Gm9x',
+        'secret': 'TrfGjSSfgUBEJg4D4EErLGXBPo6HjcwQ5kuu',
+        'capital': 6.3,
+        'leverage': 75,
         'base_grid_levels': 8,
         'use_testnet': False,
         'max_position_ratio': 0.9

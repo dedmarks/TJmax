@@ -16,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class BybitGridBot:
-    def __init__(self, api_key: str, api_secret: str, symbol: str = 'BTC/USDT:USDT', testnet: bool = True):
+    def __init__(self, api_key: str, api_secret: str, symbol: str = 'DOGE/USDT:USDT', testnet: bool = True):
         """
         Initialize Bybit Grid Trading Bot with automatic volatility-based grid calculation
         
@@ -64,7 +64,7 @@ class BybitGridBot:
         # Trend detection parameters
         self.trend_mode = 'neutral'  # 'neutral', 'strong_up', 'strong_down'
         self.trend_threshold = 0.02  # 2% momentum threshold for strong trend
-        self.trend_buy_ratio = 0.6  # In strong uptrend, 70% of funds for trending, 30% for grid
+        self.trend_buy_ratio = 0.5  # In strong uptrend, 70% of funds for trending, 30% for grid
         self.trailing_stop_percent = 0.02  # 2% trailing stop in trend mode
         self.trend_position = None  # Track trend following position
         self.highest_price_since_trend = 0
@@ -1061,17 +1061,17 @@ class BybitGridBot:
 # Example usage
 if __name__ == "__main__":
     # Configuration
-    API_KEY = "VDpt0WQXIjXul4OBrS"
-    API_SECRET = "z1Rq4a7xfF8AmmAfCjqrJGECGsnjFQJLInH9"
+    API_KEY = "aPeo9so1VKnQt2Gm9x"
+    API_SECRET = "TrfGjSSfgUBEJg4D4EErLGXBPo6HjcwQ5kuu"
     
     # Only need to specify investment amount - grid parameters are calculated automatically
-    TOTAL_INVESTMENT = 122  # Total USDT to use
+    TOTAL_INVESTMENT = 2  # Total USDT to use
     
     # Initialize bot
     bot = BybitGridBot(
         api_key=API_KEY,
         api_secret=API_SECRET,
-        symbol='DOGE/USDT:USDT',  # DOGE perpetual futures
+        symbol='1000BONK/USDT:USDT',  # DOGE perpetual futures
         testnet=False  # Use mainnet
     )
     

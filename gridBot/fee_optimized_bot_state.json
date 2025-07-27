@@ -1,1 +1,0 @@
-{"learned_patterns": [], "pattern_performance": {}, "strategy_performance": {}, "strategy_weights": {"spread_capture": 0.25, "liquidity_provision": 0.2, "pattern_maker": 0.15, "hedge_arbitrage": 0.15, "mean_reversion": 0.1, "fee_arbitrage": 0.1, "momentum": 0.05}, "total_fees_paid": 0, "total_rebates_earned": 0, "rebate_tracking": {}, "timestamp": 1752915377.5576725}
